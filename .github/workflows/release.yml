@@ -1,0 +1,48 @@
+name: Build BetterGroup Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release
+        shell: cmd
+        run: |
+          call BUILD_RELEASE.bat < nul
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $setup = "RELEASE/BetterGroup_Setup.exe"
+          $update = "RELEASE/BetterGroup_Update.zip"
+
+          gh release view $tag 2>$null
+
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag `
+              $setup `
+              $update `
+              --title "BetterGroup $tag" `
+              --prerelease `
+              --generate-notes
+          }
+          else {
+            gh release upload $tag `
+              $setup `
+              $update `
+              --clobber
+          }
