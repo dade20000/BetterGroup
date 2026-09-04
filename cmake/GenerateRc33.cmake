@@ -61,15 +61,15 @@ set(OLD "PushChatEvent(c,playerId);")
 set(NEW "PushChatEvent(c,playerId,username);")
 REPLACE_REQUIRED("PushChatEvent callers")
 
-# Shader mode 3: chat nickname. It reuses the existing neutral/text-like mask,
-# so native chromatic role names are left untouched.
+# Shader mode 3: chat nickname.
 set(OLD [=[        // mode 1 = TAB nickname with shield-anchor guard.
         // mode 2 = TAB nickname while the panel is actively being dragged.]=])
 set(NEW [=[        // mode 1 = TAB nickname with shield-anchor guard.
         // mode 2 = TAB nickname while the panel is actively being dragged.
-        // mode 3 = CHAT nickname, but ONLY while TMP rendered it in its
-        //          default neutral/white style. Native coloured staff names
-        //          (Event Team, Media Team, Game Producer, etc.) are preserved.]=])
+        // mode 3 = CHAT nickname. TMP may render default chat text in a
+        //          chromatic yellow/orange, so we cannot simply preserve every
+        //          coloured source pixel. We preserve it only when its colour
+        //          direction already matches the resolved staff-role colour.]=])
 REPLACE_REQUIRED("shader mode 3 comment")
 
 set(OLD "        if(items[i].meta.x<1.5) {")
@@ -89,12 +89,38 @@ set(NEW [=[        float mx=max(src.r,max(src.g,src.b));
         float mn=min(src.r,min(src.g,src.b));
         float chroma=mx-mn;
 
-        // Native-colour protection for chat names (mode 3). If TruckersMP
-        // already renders a staff nickname in a real role colour, chroma is
-        // non-neutral and we leave it untouched. White/default nicknames pass
-        // through and BetterGroup applies the resolved role colour.
-        if(mx<0.58 || chroma>0.13) continue;]=])
-REPLACE_REQUIRED("native colour guard comment")
+        if(mx<0.58) continue;
+
+        bool chatNicknameMode=
+            items[i].meta.x>=2.5 && items[i].meta.x<3.5;
+
+        if(chatNicknameMode) {
+            // TMP's normal chat username is not always white; on the user's
+            // client it is yellow/orange. Preserve a chromatic source only if
+            // its hue/direction is already close to the role colour BetterGroup
+            // resolved for this staff member. This keeps native Event/Simulation
+            // colours (Media Team, Event Team, Game Producer, GM, etc.) intact,
+            // while recolouring TMP's generic/default chat colour.
+            float3 target=items[i].color.rgb;
+            float targetMax=max(target.r,max(target.g,target.b));
+
+            if(chroma>0.13 && targetMax>0.001) {
+                float3 srcNorm=src.rgb/max(mx,0.001);
+                float3 targetNorm=target/targetMax;
+                float nativeDelta=
+                    abs(srcNorm.r-targetNorm.r)+
+                    abs(srcNorm.g-targetNorm.g)+
+                    abs(srcNorm.b-targetNorm.b);
+
+                if(nativeDelta<0.34) {
+                    continue; // already native role colour: do not touch it
+                }
+            }
+        } else {
+            // Existing TAB behaviour: only neutral/text-like pixels.
+            if(chroma>0.13) continue;
+        }]=])
+REPLACE_REQUIRED("native colour-aware chat guard")
 
 # Keep username and colour arrays aligned with the recent event queue.
 set(OLD [=[    std::vector<RGB> chatColors;
@@ -119,8 +145,6 @@ set(NEW "items.reserve(panelMarkers.size()*2+chatMarkers.size()*2+1);")
 REPLACE_REQUIRED("rect buffer reserve")
 
 # Add a nickname rectangle immediately to the right of each mapped chat shield.
-# Only mode 3 text-like neutral pixels are recoloured. Existing TMP role colours
-# remain untouched because chromatic pixels fail the neutral mask.
 set(OLD [=[                rc.meta[0]=0.0f;
 
                 items.push_back(rc);
@@ -134,10 +158,9 @@ set(NEW [=[                rc.meta[0]=0.0f;
                 // shield in TMP's native chat row. Only the username width is
                 // covered so we do not recolour role/ID/message text.
                 //
-                // Shader mode 3 is neutral-only: if TMP already gave the
-                // nickname a native staff colour on an Event/Simulation
-                // server, BetterGroup leaves those chromatic pixels exactly
-                // as TMP rendered them.
+                // Shader mode 3 distinguishes generic/default TMP chat colour
+                // from a true native staff-role colour by comparing it with the
+                // resolved role colour. Native role colours are left untouched.
                 const auto& username=chatUsernames[(size_t)(colorStart+i)];
                 if(!username.empty()) {
                     const int nicknameLeft=
