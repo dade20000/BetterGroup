@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
 echo ================================================
-echo   BetterGroup 1.0.0 RC3.2 - RELEASE BUILDER
+echo   BetterGroup 1.0.0 RC3.3.5 - RELEASE BUILDER
 echo ================================================
 echo.
 

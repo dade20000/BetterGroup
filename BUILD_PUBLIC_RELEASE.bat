@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 echo ================================================
-echo   BetterGroup 1.0.0 RC3.2 - PUBLIC RELEASE
+echo   BetterGroup 1.0.0 RC3.3.5 - PUBLIC RELEASE
 echo ================================================
 echo.
 
@@ -24,7 +24,7 @@ copy /Y "RELEASE\BetterGroup_Update.zip" "PUBLIC\GITHUB_RELEASE\" >nul
 copy /Y "RELEASE\BetterGroup_Setup.exe" "PUBLIC\GITHUB_RELEASE\" >nul
 
 > "PUBLIC\LEGGIMI.txt" (
-echo BetterGroup 1.0.0 RC3.2
+echo BetterGroup 1.0.0 RC3.3.5
 echo ========================
 echo.
 echo PER UN NUOVO UTENTE:
