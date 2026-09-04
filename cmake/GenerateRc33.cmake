@@ -12,21 +12,18 @@ macro(REPLACE_REQUIRED LABEL)
   string(REPLACE "${OLD}" "${NEW}" SOURCE "${SOURCE}")
 endmacro()
 
-# Version / build identity.
 set(OLD "1.0.0-rc3.2")
-set(NEW "1.0.0-rc3.3")
+set(NEW "1.0.0-rc3.3.1")
 REPLACE_REQUIRED("version strings")
 
 set(OLD "RC3.2")
-set(NEW "RC3.3")
+set(NEW "RC3.3.1")
 REPLACE_REQUIRED("display version strings")
 
 set(OLD "loaded - public pack")
-set(NEW "loaded - chat native-color-aware names")
+set(NEW "loaded - chat name default-color fix")
 REPLACE_REQUIRED("debug build label")
 
-# Keep username with each parsed staff chat event so the exact nickname width
-# can be targeted without touching role/ID/message text.
 set(OLD [=[struct ChatStaffEvent {
     RGB color;
     int playerId=-1;
@@ -61,15 +58,12 @@ set(OLD "PushChatEvent(c,playerId);")
 set(NEW "PushChatEvent(c,playerId,username);")
 REPLACE_REQUIRED("PushChatEvent callers")
 
-# Shader mode 3: chat nickname.
 set(OLD [=[        // mode 1 = TAB nickname with shield-anchor guard.
         // mode 2 = TAB nickname while the panel is actively being dragged.]=])
 set(NEW [=[        // mode 1 = TAB nickname with shield-anchor guard.
         // mode 2 = TAB nickname while the panel is actively being dragged.
-        // mode 3 = CHAT nickname. TMP may render default chat text in a
-        //          chromatic yellow/orange, so we cannot simply preserve every
-        //          coloured source pixel. We preserve it only when its colour
-        //          direction already matches the resolved staff-role colour.]=])
+        // mode 3 = CHAT nickname. TMP's ordinary chat nickname is gold/orange,
+        //          not white, so mode 3 detects that default colour explicitly.]=])
 REPLACE_REQUIRED("shader mode 3 comment")
 
 set(OLD "        if(items[i].meta.x<1.5) {")
@@ -84,45 +78,73 @@ set(OLD [=[        float mx=max(src.r,max(src.g,src.b));
         float mn=min(src.r,min(src.g,src.b));
         float chroma=mx-mn;
 
-        if(mx<0.58 || chroma>0.13) continue;]=])
+        if(mx<0.58 || chroma>0.13) continue;
+
+        int2 p=int2(pos.xy);]=])
 set(NEW [=[        float mx=max(src.r,max(src.g,src.b));
         float mn=min(src.r,min(src.g,src.b));
         float chroma=mx-mn;
 
-        if(mx<0.58) continue;
+        if(mx<0.50) continue;
 
-        bool chatNicknameMode=
+        bool chatNicknameMode =
             items[i].meta.x>=2.5 && items[i].meta.x<3.5;
 
         if(chatNicknameMode) {
-            // TMP's normal chat username is not always white; on the user's
-            // client it is yellow/orange. Preserve a chromatic source only if
-            // its hue/direction is already close to the role colour BetterGroup
-            // resolved for this staff member. This keeps native Event/Simulation
-            // colours (Media Team, Event Team, Game Producer, GM, etc.) intact,
-            // while recolouring TMP's generic/default chat colour.
             float3 target=items[i].color.rgb;
             float targetMax=max(target.r,max(target.g,target.b));
 
-            if(chroma>0.13 && targetMax>0.001) {
-                float3 srcNorm=src.rgb/max(mx,0.001);
-                float3 targetNorm=target/targetMax;
-                float nativeDelta=
-                    abs(srcNorm.r-targetNorm.r)+
-                    abs(srcNorm.g-targetNorm.g)+
-                    abs(srcNorm.b-targetNorm.b);
+            float3 srcNorm=src.rgb/max(mx,0.001);
+            float3 targetNorm=
+                targetMax>0.001 ? target/targetMax : float3(0,0,0);
 
-                if(nativeDelta<0.34) {
-                    continue; // already native role colour: do not touch it
-                }
+            float nativeDelta=
+                abs(srcNorm.r-targetNorm.r)+
+                abs(srcNorm.g-targetNorm.g)+
+                abs(srcNorm.b-targetNorm.b);
+
+            if(chroma>0.13 && nativeDelta<0.34) {
+                continue;
             }
-        } else {
-            // Existing TAB behaviour: only neutral/text-like pixels.
-            if(chroma>0.13) continue;
-        }]=])
-REPLACE_REQUIRED("native colour-aware chat guard")
 
-# Keep username and colour arrays aligned with the recent event queue.
+            // Confirmed real TMP default chat nickname core:
+            // RGB(250,200,128).
+            float3 tmpGold=float3(
+                250.0/255.0,
+                200.0/255.0,
+                128.0/255.0);
+
+            float goldMax=max(tmpGold.r,max(tmpGold.g,tmpGold.b));
+            float3 goldNorm=tmpGold/goldMax;
+
+            float goldDelta=
+                abs(srcNorm.r-goldNorm.r)+
+                abs(srcNorm.g-goldNorm.g)+
+                abs(srcNorm.b-goldNorm.b);
+
+            bool neutralText=chroma<=0.16;
+            bool tmpDefaultGold=goldDelta<0.42;
+
+            if(!(neutralText || tmpDefaultGold)) {
+                continue;
+            }
+
+            float matchStrength = neutralText
+                ? 0.90
+                : saturate((0.48-goldDelta)/0.32);
+
+            float brightness=saturate((mx-0.42)/0.58);
+            float strength=saturate(max(0.72,matchStrength)*brightness);
+
+            src.rgb=lerp(src.rgb,target,strength);
+            return src;
+        }
+
+        if(chroma>0.13) continue;
+
+        int2 p=int2(pos.xy);]=])
+REPLACE_REQUIRED("default gold chat name recolor")
+
 set(OLD [=[    std::vector<RGB> chatColors;
     chatColors.reserve(g_recentChatEvents.size());
 
@@ -144,7 +166,6 @@ set(OLD "items.reserve(panelMarkers.size()*2+chatMarkers.size()+1);")
 set(NEW "items.reserve(panelMarkers.size()*2+chatMarkers.size()*2+1);")
 REPLACE_REQUIRED("rect buffer reserve")
 
-# Add a nickname rectangle immediately to the right of each mapped chat shield.
 set(OLD [=[                rc.meta[0]=0.0f;
 
                 items.push_back(rc);
@@ -154,31 +175,34 @@ set(NEW [=[                rc.meta[0]=0.0f;
 
                 items.push_back(rc);
 
-                // CHAT nickname is immediately to the RIGHT of the staff
-                // shield in TMP's native chat row. Only the username width is
-                // covered so we do not recolour role/ID/message text.
-                //
-                // Shader mode 3 distinguishes generic/default TMP chat colour
-                // from a true native staff-role colour by comparing it with the
-                // resolved role colour. Native role colours are left untouched.
-                const auto& username=chatUsernames[(size_t)(colorStart+i)];
+                const auto& username=
+                    chatUsernames[(size_t)(colorStart+i)];
+
                 if(!username.empty()) {
                     const int nicknameLeft=
-                        std::min((int)width,std::max(0,m.x+m.w+3));
+                        std::min(
+                            (int)width,
+                            std::max(0,m.x+m.w+1));
 
                     int estimatedWidth=
-                        (int)std::lround((double)username.size()*7.15)+8;
-                    estimatedWidth=std::clamp(estimatedWidth,28,240);
+                        (int)std::lround(
+                            (double)username.size()*7.6)+12;
+
+                    estimatedWidth=
+                        std::clamp(estimatedWidth,36,250);
 
                     const int nicknameRight=
-                        std::min((int)width,nicknameLeft+estimatedWidth);
+                        std::min(
+                            (int)width,
+                            nicknameLeft+estimatedWidth);
 
                     if(nicknameRight>nicknameLeft) {
                         RectColor nick{};
                         nick.rect[0]=(float)nicknameLeft;
-                        nick.rect[1]=(float)std::max(0,m.y-2);
+                        nick.rect[1]=(float)std::max(0,m.y-4);
                         nick.rect[2]=(float)nicknameRight;
-                        nick.rect[3]=(float)std::min((int)height,m.y+m.h+2);
+                        nick.rect[3]=(float)std::min(
+                            (int)height,m.y+m.h+4);
 
                         nick.color[0]=c.r/255.0f;
                         nick.color[1]=c.g/255.0f;
@@ -187,7 +211,8 @@ set(NEW [=[                rc.meta[0]=0.0f;
                         nick.meta[0]=3.0f;
                         nick.meta[1]=(float)(m.x+m.w/2);
                         nick.meta[2]=(float)(m.y+m.h/2);
-                        nick.meta[3]=(float)std::max(2,std::min(m.w,m.h)/4);
+                        nick.meta[3]=(float)std::max(
+                            2,std::min(m.w,m.h)/4);
 
                         items.push_back(nick);
                     }
