@@ -63,11 +63,18 @@ struct VisiblePlayer {
 
 struct MarkerRect {
     int x=0, y=0, w=0, h=0;
+
+    // Chat only: true when TMP already renders the sender in a strong
+    // non-default staff colour. BetterGroup must then leave that whole
+    // sender header untouched.
+    bool nativeChatHeader=false;
 };
 
 struct ChatStaffEvent {
     RGB color;
     int playerId=-1;
+    std::string username;
+    std::string role;
     Clock::time_point when{};
 };
 
@@ -276,6 +283,7 @@ static void LoadRoles() {
 // -----------------------------------------------------------------------------
 
 static std::unordered_map<uint64_t, RGB> g_staffColorByAccount;
+static std::unordered_map<uint64_t, std::string> g_staffRoleByAccount;
 static std::unordered_set<uint64_t> g_resolvedAccounts;
 static std::unordered_map<uint64_t, Clock::time_point> g_retryAfter;
 static std::unordered_set<uint64_t> g_pending;
@@ -328,7 +336,7 @@ static bool JsonString(const std::string& body, const std::string& key, std::str
 
 static bool FetchGroupName(uint64_t accountId, std::string& groupName) {
     HINTERNET session = WinHttpOpen(
-        L"BetterGroup/1.0.0-rc3.2",
+        L"BetterGroup/1.0.0-rc3.3.5",
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS,
@@ -442,6 +450,16 @@ static bool GetStaffColor(uint64_t accountId, RGB& color) {
     return true;
 }
 
+static bool GetStaffRole(uint64_t accountId, std::string& role) {
+    std::lock_guard<std::mutex> lock(g_apiMutex);
+
+    auto it=g_staffRoleByAccount.find(accountId);
+    if(it==g_staffRoleByAccount.end()) return false;
+
+    role=it->second;
+    return !role.empty();
+}
+
 static void ApiWorker() {
     while (!g_stop.load()) {
         uint64_t accountId = 0;
@@ -483,6 +501,7 @@ static void ApiWorker() {
 
                 if (isMappedStaff) {
                     g_staffColorByAccount[accountId] = color;
+                    g_staffRoleByAccount[accountId] = groupName;
                 }
             } else {
                 g_retryAfter[accountId] = Clock::now() + std::chrono::seconds(15);
@@ -586,6 +605,8 @@ static bool g_enterWasDown=false;
 static std::deque<ChatStaffEvent> g_recentChatEvents;
 static std::unordered_map<std::string, RGB> g_teamColorByUsername;
 static std::unordered_map<int, RGB> g_teamColorByPlayerId;
+static std::unordered_map<std::string, std::string> g_teamRoleByUsername;
+static std::unordered_map<int, std::string> g_teamRoleByPlayerId;
 static bool g_expectTeamListLine=false;
 static int g_lastChatMarkerDebug=-1;
 static int g_lastChatColorDebug=-1;
@@ -938,6 +959,7 @@ static void ParseTeamMembersOnlineLine(const std::string& line) {
 
             if(playerId>=0) {
                 g_teamColorByPlayerId[playerId]=color;
+                g_teamRoleByPlayerId[playerId]=role;
 
                 Log(
                     "TEAM ROLE ID "+
@@ -948,6 +970,7 @@ static void ParseTeamMembersOnlineLine(const std::string& line) {
 
             if(!username.empty()) {
                 g_teamColorByUsername[Lower(username)]=color;
+                g_teamRoleByUsername[Lower(username)]=role;
                 Log("TEAM ROLE "+username+" -> "+role);
             }
 
@@ -971,6 +994,21 @@ static bool ColorFromTeamUsername(const std::string& username, RGB& out) {
     if(it==g_teamColorByUsername.end()) return false;
     out=it->second;
     return true;
+}
+
+static std::string RoleFromTeamIdentity(
+    const std::string& username,
+    int playerId) {
+
+    if(playerId>=0) {
+        auto idIt=g_teamRoleByPlayerId.find(playerId);
+        if(idIt!=g_teamRoleByPlayerId.end()) return idIt->second;
+    }
+
+    auto nameIt=g_teamRoleByUsername.find(Lower(username));
+    if(nameIt!=g_teamRoleByUsername.end()) return nameIt->second;
+
+    return {};
 }
 
 static std::string SenderUsername(const std::string& line) {
@@ -1048,7 +1086,39 @@ static bool ColorFromPlayerId(int playerId, RGB& out) {
     return false;
 }
 
-static void PushChatEvent(const RGB& c,int playerId) {
+static std::string RoleFromVisiblePlayerId(int playerId) {
+    if(playerId<0) return {};
+
+    for(const auto& player:g_visiblePlayers) {
+        if(player.playerId!=playerId) continue;
+
+        std::string role;
+        if(GetStaffRole(player.accountId,role)) return role;
+        return {};
+    }
+
+    return {};
+}
+
+static std::string RoleFromVisibleUsername(const std::string& username) {
+    const std::string wanted=Lower(username);
+
+    for(const auto& player:g_visiblePlayers) {
+        if(Lower(player.username)!=wanted) continue;
+
+        std::string role;
+        if(GetStaffRole(player.accountId,role)) return role;
+        return {};
+    }
+
+    return {};
+}
+
+static void PushChatEvent(
+    const RGB& c,
+    int playerId,
+    const std::string& username,
+    const std::string& role) {
     const auto now=Clock::now();
 
     // Deduplicate the exact same staff sender/color if the file writer repeats
@@ -1058,12 +1128,14 @@ static void PushChatEvent(const RGB& c,int playerId) {
 
         if(last.playerId==playerId &&
            last.color==c &&
+           Lower(last.username)==Lower(username) &&
+           Lower(last.role)==Lower(role) &&
            now-last.when<std::chrono::milliseconds(80)) {
             return;
         }
     }
 
-    g_recentChatEvents.push_back({c,playerId,now});
+    g_recentChatEvents.push_back({c,playerId,username,role,now});
 }
 
 static void ParseChatLine(const std::string& line) {
@@ -1101,6 +1173,8 @@ static void ParseChatLine(const std::string& line) {
         if(line.find("* ")!=std::string::npos) {
             g_teamColorByUsername.clear();
             g_teamColorByPlayerId.clear();
+            g_teamRoleByUsername.clear();
+            g_teamRoleByPlayerId.clear();
             ParseTeamMembersOnlineLine(line);
             return;
         }
@@ -1116,19 +1190,31 @@ static void ParseChatLine(const std::string& line) {
     // BEST source for normal chat: system-generated "Team members online"
     // mapping. This contains the exact role TMP displays, unlike the chat line.
     if(ColorFromTeamUsername(username,c)) {
-        PushChatEvent(c,playerId);
+        PushChatEvent(
+            c,
+            playerId,
+            username,
+            RoleFromTeamIdentity(username,playerId));
         return;
     }
 
     // Fallback: visible player id -> API.
     if(ColorFromPlayerId(playerId,c)) {
-        PushChatEvent(c,playerId);
+        PushChatEvent(
+            c,
+            playerId,
+            username,
+            RoleFromVisiblePlayerId(playerId));
         return;
     }
 
     // Last fallback: visible username -> API.
     if(ColorFromVisibleUsername(lowerLine,c)) {
-        PushChatEvent(c,playerId);
+        PushChatEvent(
+            c,
+            playerId,
+            username,
+            RoleFromVisibleUsername(username));
     }
 }
 
@@ -1381,6 +1467,107 @@ static bool EnsureSlot(
     return true;
 }
 
+static bool LooksLikeNativeChatHeader(
+    const D3D11_MAPPED_SUBRESOURCE& mapped,
+    UINT width,
+    UINT height,
+    DXGI_FORMAT format,
+    const MarkerRect& m) {
+
+    const int chatRight=
+        std::clamp((int)(width*0.12f),110,220);
+
+    if(m.x>=chatRight) return false;
+
+    // Only scan the username-side beginning of the sender header.
+    const int x0=std::clamp(m.x+m.w+1,0,(int)width);
+    const int x1=std::clamp(x0+180,0,(int)width);
+    const int y0=std::clamp(m.y-4,0,(int)height);
+    const int y1=std::clamp(m.y+m.h+4,0,(int)height);
+
+    if(x1<=x0 || y1<=y0) return false;
+
+    // TMP generic/default chat gold ~= RGB(250,200,128).
+    const float goldR=1.0f;
+    const float goldG=200.0f/250.0f;
+    const float goldB=128.0f/250.0f;
+
+    int nativePixels=0;
+    int goldPixels=0;
+
+    auto luminanceAt=[&](int x,int y)->float {
+        x=std::clamp(x,0,(int)width-1);
+        y=std::clamp(y,0,(int)height-1);
+
+        const uint8_t* row=
+            (const uint8_t*)mapped.pData+
+            (size_t)y*mapped.RowPitch;
+
+        uint8_t r=0,g=0,b=0;
+        ReadRGB(row+(size_t)x*4,format,r,g,b);
+
+        return
+            0.299f*(float)r+
+            0.587f*(float)g+
+            0.114f*(float)b;
+    };
+
+    for(int y=y0;y<y1;++y) {
+        const uint8_t* row=
+            (const uint8_t*)mapped.pData+
+            (size_t)y*mapped.RowPitch;
+
+        for(int x=x0;x<x1;++x) {
+            uint8_t r8=0,g8=0,b8=0;
+            ReadRGB(row+(size_t)x*4,format,r8,g8,b8);
+
+            const int mx=std::max({
+                (int)r8,(int)g8,(int)b8});
+            const int mn=std::min({
+                (int)r8,(int)g8,(int)b8});
+            const int chroma=mx-mn;
+
+            if(mx<105 || chroma<35) continue;
+
+            const float lum=
+                0.299f*(float)r8+
+                0.587f*(float)g8+
+                0.114f*(float)b8;
+
+            // Native GM red may be darker than the translucent background,
+            // so use absolute local contrast rather than "brighter only".
+            int contrasted=0;
+            contrasted +=
+                (std::abs(lum-luminanceAt(x-2,y))>17.0f) ? 1 : 0;
+            contrasted +=
+                (std::abs(lum-luminanceAt(x+2,y))>17.0f) ? 1 : 0;
+            contrasted +=
+                (std::abs(lum-luminanceAt(x,y-2))>17.0f) ? 1 : 0;
+            contrasted +=
+                (std::abs(lum-luminanceAt(x,y+2))>17.0f) ? 1 : 0;
+
+            if(contrasted<1) continue;
+
+            const float inv=1.0f/(float)mx;
+            const float nr=(float)r8*inv;
+            const float ng=(float)g8*inv;
+            const float nb=(float)b8*inv;
+
+            const float goldDelta=
+                std::abs(nr-goldR)+
+                std::abs(ng-goldG)+
+                std::abs(nb-goldB);
+
+            if(goldDelta<0.43f) ++goldPixels;
+            else ++nativePixels;
+        }
+    }
+
+    return
+        nativePixels>=12 &&
+        nativePixels>goldPixels;
+}
+
 static void DetectMarkersFromMapped(
     const D3D11_MAPPED_SUBRESOURCE& mapped,
     UINT width,
@@ -1469,6 +1656,10 @@ static void DetectMarkersFromMapped(
             m.w=std::min((int)width-m.x,bw+4);
             m.h=std::min((int)height-m.y,bh+4);
 
+            m.nativeChatHeader=
+                LooksLikeNativeChatHeader(
+                    mapped,width,height,format,m);
+
             found.push_back(m);
         }
     }
@@ -1504,6 +1695,8 @@ static void DetectMarkersFromMapped(
                 c.y=y1;
                 c.w=x2-x1;
                 c.h=y2-y1;
+                c.nativeChatHeader=
+                    c.nativeChatHeader || m.nativeChatHeader;
 
                 duplicate=true;
                 break;
@@ -1728,6 +1921,9 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 
         // mode 1 = TAB nickname with shield-anchor guard.
         // mode 2 = TAB nickname while the panel is actively being dragged.
+        // mode 3 = CHAT nickname. TMP's ordinary/default chat nickname is
+        //          GOLD/ORANGE (not white), so mode 3 explicitly recognises
+        //          that default colour. Native staff-role colours are preserved.
         //
         // During a known drag the rectangle is translated from the mouse delta
         // every frame, so waiting for the magenta anchor is counterproductive:
@@ -1744,7 +1940,11 @@ float4 main(float4 pos : SV_Position) : SV_Target {
         // We sample a small cross around the shield center. The marker texture
         // contains enough magenta area that at least one sample should hit while
         // the row is still at the expected position.
-        if(items[i].meta.x<1.5) {
+        bool needsShieldAnchor =
+            (items[i].meta.x>=0.5 && items[i].meta.x<1.5) ||
+            (items[i].meta.x>=2.5 && items[i].meta.x<3.5);
+
+        if(needsShieldAnchor) {
             int2 ac=int2(items[i].meta.yz);
             int ar=max(2,(int)items[i].meta.w);
 
@@ -1788,7 +1988,123 @@ float4 main(float4 pos : SV_Position) : SV_Target {
         float mn=min(src.r,min(src.g,src.b));
         float chroma=mx-mn;
 
-        if(mx<0.58 || chroma>0.13) continue;
+        if(mx<0.50) continue;
+
+        bool chatNicknameMode =
+            items[i].meta.x>=2.5 && items[i].meta.x<3.5;
+
+        if(chatNicknameMode) {
+            // Confirmed from the real TMP client screenshot:
+            // default chat nickname core ~= RGB(250,200,128).
+            //
+            // Recolour only:
+            //   1) neutral/white-ish text, or
+            //   2) TMP's generic gold/orange chat text.
+            //
+            // If the source already points toward this staff member's resolved
+            // role colour, it is native TMP staff colouring and is left alone.
+            float3 target=items[i].color.rgb;
+            float targetMax=max(target.r,max(target.g,target.b));
+
+            float3 srcNorm=src.rgb/max(mx,0.001);
+            float3 targetNorm=
+                targetMax>0.001 ? target/targetMax : float3(0,0,0);
+
+            float nativeDelta=
+                abs(srcNorm.r-targetNorm.r)+
+                abs(srcNorm.g-targetNorm.g)+
+                abs(srcNorm.b-targetNorm.b);
+
+            if(chroma>0.13 && nativeDelta<0.34) {
+                continue; // already native TMP role colour
+            }
+
+            // TMP generic chat gold: 250,200,128.
+            float3 tmpGold=float3(
+                250.0/255.0,
+                200.0/255.0,
+                128.0/255.0);
+
+            float goldMax=max(tmpGold.r,max(tmpGold.g,tmpGold.b));
+            float3 goldNorm=tmpGold/goldMax;
+
+            float goldDelta=
+                abs(srcNorm.r-goldNorm.r)+
+                abs(srcNorm.g-goldNorm.g)+
+                abs(srcNorm.b-goldNorm.b);
+
+            bool neutralText=chroma<=0.16;
+            bool tmpDefaultGold=goldDelta<0.42;
+
+            if(!(neutralText || tmpDefaultGold)) {
+                continue;
+            }
+
+            // RC3.3.5 NATIVE EDGE GUARD:
+            // Native TMP staff text (for example a GM already red) has
+            // anti-aliased edge pixels that can be much more neutral than the
+            // coloured glyph core. RC3.3.3 could recolour those few edge
+            // pixels, making the first letters look slightly "taken".
+            //
+            // If a nearby pixel belongs to a bright chromatic NON-default-gold
+            // glyph, preserve this candidate too.
+            uint cw=0,ch=0;
+            Source.GetDimensions(cw,ch);
+            int2 cp=int2(pos.xy);
+
+            bool nativeNeighbour=false;
+
+            int2 offsets[8] = {
+                int2(-2, 0), int2( 2, 0),
+                int2( 0,-2), int2( 0, 2),
+                int2(-1,-1), int2( 1,-1),
+                int2(-1, 1), int2( 1, 1)
+            };
+
+            [unroll]
+            for(int n=0;n<8;++n) {
+                int2 q=int2(
+                    clamp(cp.x+offsets[n].x,0,(int)cw-1),
+                    clamp(cp.y+offsets[n].y,0,(int)ch-1));
+
+                float3 ns=Source.Load(int3(q,0)).rgb;
+                float nmx=max(ns.r,max(ns.g,ns.b));
+                float nmn=min(ns.r,min(ns.g,ns.b));
+                float nchroma=nmx-nmn;
+
+                if(nmx<0.42 || nchroma<=0.16) continue;
+
+                float3 nn=ns/max(nmx,0.001);
+
+                float ngoldDelta=
+                    abs(nn.r-goldNorm.r)+
+                    abs(nn.g-goldNorm.g)+
+                    abs(nn.b-goldNorm.b);
+
+                if(ngoldDelta>=0.42) {
+                    nativeNeighbour=true;
+                    break;
+                }
+            }
+
+            if(nativeNeighbour) {
+                continue;
+            }
+
+            // Exact role RGB on the glyph core. Only dim anti-aliased edges
+            // retain a tiny blend so the text stays smooth.
+            if(mx>=0.70) {
+                src.rgb=target;
+                return src;
+            }
+
+            float edgeStrength=saturate((mx-0.50)/0.20);
+            src.rgb=lerp(src.rgb,target,0.82+0.18*edgeStrength);
+            return src;
+        }
+
+        // Existing TAB behaviour remains neutral/text-like only.
+        if(chroma>0.13) continue;
 
         int2 p=int2(pos.xy);
         uint tw=0,th=0;
@@ -2387,6 +2703,9 @@ static int FillShaderBuffer(UINT width,UINT height) {
     UpdatePanelDragFollow(width,height);
     UpdateLocalChatSendArm();
 
+    static std::vector<MarkerRect> cachedChatMarkers;
+    static Clock::time_point cachedChatMarkersAt{};
+
     std::vector<MarkerRect> panelMarkers;
     std::vector<MarkerRect> chatMarkers;
 
@@ -2403,6 +2722,25 @@ static int FillShaderBuffer(UINT width,UINT height) {
             // as a Player Panel candidate.
             panelMarkers.push_back(m);
         }
+    }
+
+    // CHAT REOPEN CACHE:
+    // Reuse the last confirmed chat-row positions for a few frames if TMP
+    // rebuilds the chat widget while opening/closing it. The sender-header
+    // shader still requires a live magenta shield anchor, so stale rows cannot
+    // paint unrelated UI.
+    const auto chatCacheNow=Clock::now();
+
+    if(!chatMarkers.empty()) {
+        cachedChatMarkers=chatMarkers;
+        cachedChatMarkersAt=chatCacheNow;
+    } else if(
+        !cachedChatMarkers.empty() &&
+        cachedChatMarkersAt.time_since_epoch().count()!=0 &&
+        chatCacheNow-cachedChatMarkersAt<
+            std::chrono::milliseconds(400)) {
+
+        chatMarkers=cachedChatMarkers;
     }
 
     // ZERO-LAG TAB DRAG PATH:
@@ -2438,10 +2776,20 @@ static int FillShaderBuffer(UINT width,UINT height) {
     for(const auto& e:panelEntries) panelColors.push_back(e.color);
 
     std::vector<RGB> chatColors;
+    std::vector<std::string> chatUsernames;
+    std::vector<std::string> chatRoles;
+    std::vector<int> chatPlayerIds;
+
     chatColors.reserve(g_recentChatEvents.size());
+    chatUsernames.reserve(g_recentChatEvents.size());
+    chatRoles.reserve(g_recentChatEvents.size());
+    chatPlayerIds.reserve(g_recentChatEvents.size());
 
     for(const auto& ev:g_recentChatEvents) {
         chatColors.push_back(ev.color);
+        chatUsernames.push_back(ev.username);
+        chatRoles.push_back(ev.role);
+        chatPlayerIds.push_back(ev.playerId);
     }
 
     const int chatCount=(int)chatMarkers.size();
@@ -2459,7 +2807,7 @@ static int FillShaderBuffer(UINT width,UINT height) {
     }
 
     std::vector<RectColor> items;
-    items.reserve(panelMarkers.size()*2+chatMarkers.size()+1);
+    items.reserve(panelMarkers.size()*2+chatMarkers.size()*2+1);
 
     // Player Panel.
     //
@@ -2576,6 +2924,85 @@ static int FillShaderBuffer(UINT width,UINT height) {
                 rc.meta[0]=0.0f;
 
                 items.push_back(rc);
+
+                const size_t eventIndex=(size_t)(colorStart+i);
+                const auto& username=chatUsernames[eventIndex];
+                const auto& role=chatRoles[eventIndex];
+                const int senderId=chatPlayerIds[eventIndex];
+
+                if(!username.empty() && !m.nativeChatHeader) {
+                    // RC3.3.5: colour the COMPLETE TMP sender header only when
+                    // TMP did NOT already render this staff row natively.
+                    //
+                    // This prevents native GM/Event/Media/Game Producer text
+                    // from being thickened/highlighted on its first letters.
+                    //
+                    // For default TMP chat rows, colour:
+                    //
+                    //   username (Role 1234)
+                    //
+                    // not only the username. The message text starts after the
+                    // closing ')' / ':' and is intentionally outside this rect.
+                    //
+                    // This rectangle exists only while the native staff shield
+                    // exists at the same row. Therefore /toggle-group OFF for
+                    // the local player removes the anchor and BetterGroup stops
+                    // applying the sender-header colour.
+                    const int senderLeft=
+                        std::min(
+                            (int)width,
+                            std::max(0,m.x+m.w+1));
+
+                    size_t headerChars=username.size();
+
+                    if(!role.empty()) {
+                        // " (Role 1234)"
+                        headerChars += 3 + role.size();
+
+                        if(senderId>=0) {
+                            headerChars +=
+                                std::to_string(senderId).size()+1;
+                        }
+
+                        headerChars += 1; // closing ')'
+                    }
+
+                    // TMP chat font at 100% HUD scaling is roughly 8-9 px per
+                    // average glyph. Keep a small safety margin but stop before
+                    // the actual message body.
+                    int estimatedWidth=
+                        (int)std::lround(
+                            (double)headerChars*8.55)+10;
+
+                    estimatedWidth=
+                        std::clamp(estimatedWidth,36,430);
+
+                    const int senderRight=
+                        std::min(
+                            (int)width,
+                            senderLeft+estimatedWidth);
+
+                    if(senderRight>senderLeft) {
+                        RectColor nick{};
+                        nick.rect[0]=(float)senderLeft;
+                        nick.rect[1]=(float)std::max(0,m.y-4);
+                        nick.rect[2]=(float)senderRight;
+                        nick.rect[3]=(float)std::min(
+                            (int)height,m.y+m.h+4);
+
+                        nick.color[0]=c.r/255.0f;
+                        nick.color[1]=c.g/255.0f;
+                        nick.color[2]=c.b/255.0f;
+                        nick.color[3]=1.0f;
+                        nick.meta[0]=3.0f;
+                        nick.meta[1]=(float)(m.x+m.w/2);
+                        nick.meta[2]=(float)(m.y+m.h/2);
+                        nick.meta[3]=(float)std::max(
+                            2,std::min(m.w,m.h)/4);
+
+                        items.push_back(nick);
+                    }
+                }
             }
         } else if(chatCount==1 && chatColors.empty()) {
             RGB localColor;
@@ -3023,7 +3450,7 @@ TMP_EXPORT bool TMP_API truckersmp_init(
     PluginInfo info;
     info.m_name="BetterGroup";
     info.m_author="Dade";
-    info.m_version="1.0.0-rc3.2";
+    info.m_version="1.0.0-rc3.3.5";
     info.m_description=
         "Role-aware TruckersMP group styling for Player Panel and chat.";
 
@@ -3050,7 +3477,7 @@ TMP_EXPORT bool TMP_API truckersmp_init(
 
         g_session->UserInterface().ShowNotification(
             NotificationType::Error,
-            "BetterGroup 1.0.0 RC3.2: DirectX init failed");
+            "BetterGroup 1.0.0 RC3.3.5: DirectX init failed");
 
         return true;
     }
@@ -3061,7 +3488,7 @@ TMP_EXPORT bool TMP_API truckersmp_init(
     g_session->Render().OnPostRender.Register(OnPostRender);
 
     Log(
-        "BetterGroup 1.0.0-rc3.2 loaded - public pack");
+        "BetterGroup 1.0.0-rc3.3.5 loaded - chat native-row guard + reopen cache");
 
     return true;
 }
