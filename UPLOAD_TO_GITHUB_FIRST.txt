@@ -1,0 +1,23 @@
+BETTERGROUP - CARTELLA PRONTA PER GITHUB
+
+1) Crea su GitHub:
+   dade20000/BetterGroup
+
+2) Carica IL CONTENUTO di questa cartella nella root del repository.
+   README.md deve risultare direttamente nella root, non dentro una seconda sottocartella.
+
+3) Per creare la release pubblica sul tuo PC:
+   BUILD_PUBLIC_RELEASE.bat
+
+4) Nella GitHub Release carica:
+   PUBLIC\GITHUB_RELEASE\BetterGroup_Setup.exe
+   PUBLIC\GITHUB_RELEASE\BetterGroup_Update.zip
+
+5) Gli utenti nuovi scaricano SOLO:
+   BetterGroup_Setup.exe
+
+6) Gli utenti gia' installati usano:
+   Start -> BetterGroup -> Check for updates
+
+Logo attuale: emoji shield 🛡️ nel README.
+Nessun PNG TruckersMP viene incluso nel repository.
