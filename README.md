@@ -1,6 +1,6 @@
 # 🛡️ BetterGroups
 
-BetterGroups is a community-made TruckersMP GameClientSDK plugin that improves the visual display of staff groups in the Player Panel and chat.
+BetterGroups is a community-made TruckersMP GameClientSDK plugin that improves the visual display of staff groups in the Player Panel and chat..
 
 > Current public test line: **1.0.0 RC3.2**
 
